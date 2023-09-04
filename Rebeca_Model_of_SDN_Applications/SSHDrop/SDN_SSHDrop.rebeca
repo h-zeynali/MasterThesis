@@ -1,0 +1,338 @@
+env int flowTableRowSize = 10;
+env byte SentPacketCount = 2;
+reactiveclass Controller(10) { 
+	knownrebecs {
+		Switch s1;
+		Switch s2;
+	}
+	statevars {  	
+	}
+	Controller() {
+	}
+	msgsrv newPacketInMessage(byte switchId, byte packetSrcIP , byte packetDestIP, byte packetData, byte packetProtocol, byte packetPriority, byte IngressPort){
+		// This message is sent from a switch to the controller when the switch processes a packet
+		// for which it has no action rule to apply.  
+		if (packetProtocol == 1) // ssh packets
+		{
+			if (switchId == 1) {
+		    	s1.newPacketOutMessage(2 /*Field Match for protocol*/, packetSrcIP , packetDestIP, packetData , packetProtocol , packetPriority, IngressPort , 2 ,127);//action 2 = drop
+			} else if (switchId == 2) {
+		    	s2.newPacketOutMessage(2 /*Field Match for protocol*/, packetSrcIP , packetDestIP, packetData , packetProtocol , packetPriority, IngressPort , 2 ,127);//action 2 = drop
+			}	
+		}
+		else
+		{  // for other protocol send port 0 to 1 & port 1 to 0 
+			byte outgressPort = 0;
+			if (IngressPort == 1)
+				outgressPort = 2;
+			else //(IngressPort == 2)
+				outgressPort = 1;
+				
+			if (switchId == 1) {
+		    	//so send message to s1 to forward header IP = 10 to port 1
+		    	s1.newPacketOutMessage(3 /*Field Match for ingress port*/, packetSrcIP , packetDestIP, packetData , packetProtocol , packetPriority, IngressPort , 1, outgressPort);
+			} else if (switchId == 2) {
+				s2.newPacketOutMessage(3 /*Field Match for ingress port*/, packetSrcIP , packetDestIP, packetData , packetProtocol , packetPriority, IngressPort , 1, outgressPort);
+			}				 
+		}
+	}
+}
+reactiveclass Switch(10) { 
+	knownrebecs {
+		Controller controller; 
+	} 
+	statevars {
+		byte id;
+		byte [10] flowTableRuleType; // 0 means this field is empty, 1 for matching field = Src & Dest IP, 2 for M.F.= Protocol, 3 for M.f.=IngressPort
+		byte [10] flowTableHeaderSrcIP;		
+		byte [10] flowTableHeaderDestIP;
+		byte [10] flowTableHeaderProtocol;
+		byte [10] flowTableHeaderPriority;
+		byte [10] flowTableIngressPortOfPacket;
+		byte [10] flowTableActionType; // 1 for forward - 2 for drop
+ 		byte [10] flowTableActionOutPort;
+
+		Switch  neighborSwitch;
+		byte	neighborSwitchPort;
+		Host 	connectedHost;
+		byte	connectedHostPort;
+		boolean testError;
+		boolean testError1;
+		boolean testError2;
+		boolean testError3;
+	} 
+   
+	Switch(byte switchId, Host connected_host, byte connected_hostPort, Switch neighborSw, byte neighborSwPort) { 
+	    id = switchId;
+	    connectedHost 		= connected_host;
+		connectedHostPort 	= connected_hostPort;
+	    neighborSwitch 		= neighborSw;
+	    neighborSwitchPort 	= neighborSwPort;
+		FT_reset();
+		testError = false;
+		testError1 = false;
+		testError2 = false;
+		testError3 = false;
+	}
+	
+	msgsrv swHandlePacket(byte packetSrcIP , byte packetDestIP, byte packetData, byte packetProtocol, byte packetPriority, byte IngressPort) { 
+	    int i;
+	    boolean hasRuleInTable= false;
+
+	    //lookup in flow table 
+	    for (i = 0; i < 10; i = i + 1) {
+	    	if (flowTableRuleType[i] != 0) // if i th field is not empty 
+	    	{
+	    		if ( 	//rule type 3 Match Accured
+	    				(flowTableRuleType[i] == 3 && flowTableIngressPortOfPacket[i] == IngressPort ))
+		    	
+		    	{
+		    		testError3 = true;
+		    	}
+		    	else if ( //rule type 2 Match Accured
+	    				(flowTableRuleType[i] == 2 && flowTableHeaderProtocol[i] == packetProtocol)
+	    				)
+		    	
+		    	{
+		    		testError2 = true;
+		    	}
+		    	else if ( (	//rule type 1 Match Accured
+	    				flowTableRuleType[i] == 1 && flowTableHeaderDestIP[i] == packetDestIP && flowTableHeaderSrcIP[i] == packetSrcIP)
+	    				)
+		    	
+		    	{
+		    		testError1 = true;
+		    	}
+		    	else if ( (	//rule type 1 Match Accured
+	    				flowTableRuleType[i] == 1 && flowTableHeaderDestIP[i] == packetDestIP && flowTableHeaderSrcIP[i] == packetSrcIP)
+	    				||//rule type 2 Match Accured
+	    				(flowTableRuleType[i] == 2 && flowTableHeaderProtocol[i] == packetProtocol)
+	    				||//rule type 3 Match Accured
+	    				(flowTableRuleType[i] == 3 && flowTableIngressPortOfPacket[i] == IngressPort ))
+		    	
+		    	{
+		    		hasRuleInTable = true;
+		    		if (flowTableActionType[i] == 1) //means Forward packet
+		    		{
+			    		if (flowTableActionOutPort[i] == neighborSwitchPort){ 
+							neighborSwitch.swHandlePacket(packetSrcIP, packetDestIP, packetData, packetProtocol, packetPriority, neighborSwitchPort);				
+						}else /*if (flowTableActionOutPort[i] == connectedHostPort)*/ { 
+							connectedHost.hostHandlePacket(packetSrcIP, packetDestIP, packetData, packetProtocol, packetPriority); 
+						}
+					}else if (flowTableActionType[i] == 2) //means drop packet
+					{
+						testError = true;// nothing need to do 
+					}
+				}
+
+	    	}
+		}
+
+		//If match not occured means we have new packet. so should ask routing from controller.
+		if (hasRuleInTable == false){
+			controller.newPacketInMessage(id, packetSrcIP, packetDestIP, packetData, packetProtocol, packetPriority, IngressPort);
+			//wait for controller response
+		}
+	}
+		
+	msgsrv newPacketOutMessage(byte FTRuleType, byte FTHeaderSrcIP, byte FTHeaderDestIP, byte FTPacketData, byte FTHeaderProtocol, 
+								byte FTHeaderPriority, byte FTIngressPortOfSwitch, byte FTActionType, byte FTActionOutPort){
+		//This message is sent from the controller to a switch to notify 
+		//that it must re-try applying an action rule to a buffered packet. 
+		//The message includes the packet header
+		//insert new rule to flow table
+		boolean ruleIsInserted = installOrModifyRule( FTRuleType, FTHeaderSrcIP, FTHeaderDestIP, FTHeaderProtocol, 
+													  FTHeaderPriority, FTIngressPortOfSwitch, FTActionType, FTActionOutPort);
+
+	    if (ruleIsInserted == true){
+	    	self.swHandlePacket(FTHeaderSrcIP, FTHeaderDestIP, FTPacketData, FTHeaderProtocol, FTHeaderPriority, FTIngressPortOfSwitch);
+	    } 
+	}
+	msgsrv modifyState(byte FTRuleType, byte FTHeaderSrcIP, byte FTHeaderDestIP, byte FTHeaderProtocol, 
+								byte FTHeaderPriority, byte FTIngressPortOfSwitch, byte FTActionType, byte FTActionOutPort){
+		//action 2 = drop & 1 = forward
+		//new action rules to be inserted into the switch's flow-table
+		//insert new rule to flow table
+		installOrModifyRule( FTRuleType, FTHeaderSrcIP, FTHeaderDestIP, FTHeaderProtocol, 
+													  FTHeaderPriority, FTIngressPortOfSwitch, FTActionType, FTActionOutPort);
+	}
+	boolean installOrModifyRule(byte FTRuleType, byte FTHeaderSrcIP, byte FTHeaderDestIP, byte FTHeaderProtocol, 
+								byte FTHeaderPriority, byte FTIngressPortOfSwitch, byte FTActionType, byte FTActionOutPort)
+	{
+		boolean ruleIsInserted = false;
+		int i;
+		for (i = 0; i < 10; i = i + 1) 
+		{
+	    	if (ruleIsInserted == false ) 
+	    	{
+	    		if (FTRuleType == 1 ) // for matching field = Src & Dest IP
+	    		{
+		    		if (flowTableHeaderDestIP[i] == 0 || 
+		    				(	flowTableRuleType[i] 	== FTRuleType
+		    				&&	flowTableHeaderSrcIP[i] == FTHeaderSrcIP 
+		    				&& 	flowTableHeaderDestIP[i]== FTHeaderDestIP
+		    				) )
+		    		{
+		    			//flowTableHeaderDestIP[i] == 0 so install new rule 
+		    			//or modify if match accured  
+		    			flowTableRuleType[i] 			= FTRuleType;
+		    			flowTableHeaderSrcIP[i]  		= FTHeaderSrcIP;
+		    			flowTableHeaderDestIP[i]		= FTHeaderDestIP;
+		    			flowTableHeaderProtocol[i] 		= FTHeaderProtocol;
+		    			flowTableHeaderPriority[i]		= FTHeaderPriority;
+		    			flowTableIngressPortOfPacket[i] = FTIngressPortOfSwitch;
+		    			flowTableActionType[i] 			= FTActionType;
+		    			flowTableActionOutPort[i] 		= FTActionOutPort;
+		    			ruleIsInserted = true;
+	    			}
+	    				
+	    		}else if (FTRuleType == 2) // for for Matching Field = Protocol
+	    		{
+	    			if (flowTableHeaderDestIP[i] == 0 || 
+	    				(flowTableRuleType[i] == FTRuleType 
+	    				&& flowTableHeaderProtocol[i] == FTHeaderProtocol))
+	    			{
+		    			//flowTableHeaderDestIP[i] == 0 so install new rule 
+		    			//or modify if match accured  
+		    			flowTableRuleType[i] 			= FTRuleType;
+		    			flowTableHeaderSrcIP[i]  		= 127; // means all sources
+		    			flowTableHeaderDestIP[i]		= 127; // means all Destinations
+		    			flowTableHeaderProtocol[i] 		= FTHeaderProtocol;
+		    			flowTableHeaderPriority[i]		= 127; // means all priorities
+		    			flowTableIngressPortOfPacket[i] = 127; // means all ingress ports
+		    			flowTableActionType[i] 			= FTActionType; 
+		    			flowTableActionOutPort[i] 		= FTActionOutPort;
+		    			ruleIsInserted = true;
+
+	    			}
+	    		}else if (FTRuleType == 3)// 3 for M.f.=IngressPort
+	    		{
+	    			if (flowTableHeaderDestIP[i] == 0 ||
+	    				(flowTableRuleType[i] == FTRuleType 
+	    				&& flowTableIngressPortOfPacket[i] == FTIngressPortOfSwitch ))
+	    			{
+		    			//flowTableHeaderDestIP[i] == 0 so install new rule 
+		    			//or modify if match accured  
+		    			flowTableRuleType[i] 			= FTRuleType;
+		    			flowTableHeaderSrcIP[i]  		= 127; // means all sources
+		    			flowTableHeaderDestIP[i]		= 127; // means all Destinations
+		    			flowTableHeaderProtocol[i] 		= 127; // means all Protocols
+		    			flowTableHeaderPriority[i]		= 127; // means all priorities
+		    			flowTableIngressPortOfPacket[i] = FTIngressPortOfSwitch; 
+		    			flowTableActionType[i] 			= FTActionType; 
+		    			flowTableActionOutPort[i] 			= FTActionOutPort;
+		    			ruleIsInserted = true;
+
+	    			}
+	    		}
+	    	}
+	    }
+	    return ruleIsInserted;
+	}
+
+
+	boolean FT_reset()
+	{
+		int i; 
+     	for (i = 0; i < 10; i = i + 1) 
+     	{
+
+ 			flowTableRuleType[i]			= 0;
+     		flowTableHeaderSrcIP[i]			= 0;
+     		flowTableHeaderDestIP[i] 		= 0;
+     		flowTableHeaderProtocol[i] 		= 0;
+     		flowTableHeaderPriority[i] 		= 0;
+     		flowTableIngressPortOfPacket[i] = 0;
+     		flowTableActionType[i] 			= 0;
+     		flowTableActionOutPort[i] 		= 0;
+     	}
+	}
+}
+reactiveclass Host(10) { 
+	knownrebecs {
+		Switch knownSwitch; 
+ 	}
+	statevars { 
+		byte id;
+		byte portOfSwitchConnectedtoHost;
+		byte [2/*SentPacketCount*/] receivedData;
+		boolean shhError;
+		boolean dataReceivedError; 
+	}
+	Host(byte hostId, byte portOfSwitchConnectedto) { 
+		id = hostId; 
+		portOfSwitchConnectedtoHost = portOfSwitchConnectedto;
+		if (id == 1) { 
+			// sample package will be send from c1 
+			// to destination host indicated by header IP = 10 
+			self.sendInPacket(1, 2, 1, 2, 0, portOfSwitchConnectedto); // protocol 2 = FFT packet
+			self.sendInPacket(1, 2, 2, 1, 0, portOfSwitchConnectedto); // protocol 1 = ssh packet
+		} 
+		shhError = false;
+		dataReceivedError = false;
+		receivedData[0] = 0;
+		receivedData[1] = 0;
+	}  
+	msgsrv sendInPacket(byte packetSrcIP , byte packetDestIP, byte packetData, byte packetProtocol, byte packetPriority, byte portOfSwitchConnectedto) { 
+		knownSwitch.swHandlePacket(packetSrcIP, packetDestIP, packetData, packetProtocol, packetPriority, portOfSwitchConnectedto); 
+	}
+	msgsrv hostHandlePacket(byte packetSrcIP , byte packetDestIP, byte packetData, byte packetProtocol, byte packetPriority) {
+		self.done() after(5);
+		LogReceivedData( packetData );
+		if (packetProtocol == 1){
+				shhError = true;
+			}
+		if (id == 2 ) {//packet received in c1
+			if (packetData == 1){
+				self.done() after(5);
+			}
+		}
+	}
+	msgsrv done() {
+		self.done() after(5);
+		if (id== 2) // check data receied in c2
+			dataReceivedError = true ;//!(CheckReceivedData());
+		
+	}
+	boolean LogReceivedData(byte received_data){
+		int i; 
+		boolean isReceivedDataLogged = false;
+     	for (i = 0; i < SentPacketCount; i = i + 1)
+     	{
+     		if (receivedData[i] == 0 && !isReceivedDataLogged )
+     			receivedData[i] = received_data;
+     	}
+		return isReceivedDataLogged;
+	}
+	boolean CheckReceivedData(){
+		int i; 
+     	for (i = 0; i < SentPacketCount; i = i + 1)
+     	{
+     		if (receivedData[i] == 0  )
+     		{
+     			return false;
+     		}
+     			
+     	}
+		return true;
+	}
+}
+main { 
+	Controller controller(s1, s2):(); 
+   	//each switch has 2 port ={0,1} , related hosts connected to port 0
+   	//Switch parameters = id, connected host, port of switch that connected to host
+   	//						, connected switch, port of switch that connected to switch
+	Switch s1(controller):(1, c1, 1, s2, 2); 
+	Switch s2(controller):(2, c2, 2, s1, 1); 
+	Host c1(s1):(1, 1);
+	Host c2(s2):(2, 2);
+  	// Topology: 
+	//       _______(C)  
+	//      /        |  
+	//     /         |         
+	//  (S1)_2____1_(S2)
+	//   |           |            
+	//   1           2            
+	//   |           |            
+	//  (c1)        (c2)         
+}
