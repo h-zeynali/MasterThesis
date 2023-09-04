@@ -1,4 +1,3 @@
-# MasterThesis title:
 Actor-Based Model Checking and Analysis of Software Defined Networks by Rebeca
 
 Abstract:
